@@ -8,11 +8,14 @@
 #![deny(clippy::large_stack_frames)]
 
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
-use esp_hal::clock::CpuClock;
-use esp_hal::gpio::{Level, Output, OutputConfig};
+use esp_hal::gpio::DriveMode;
+use esp_hal::ledc::LSGlobalClkSource;
+use esp_hal::ledc::channel::ChannelIFace;
+use esp_hal::ledc::timer::LSClockSource;
+use esp_hal::ledc::timer::TimerIFace;
+use esp_hal::ledc::timer::config::{Config, Duty};
+use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
-use esp_println::println;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -29,9 +32,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    // generator version: 1.1.0
-
-    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
+    let config = esp_hal::Config::default();
     let peripherals = esp_hal::init(config);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -40,20 +41,45 @@ async fn main(spawner: Spawner) -> ! {
 
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
-    // Define the LED pin - we're going to connect it to GPIO pin 1
-    let mut led = Output::new(peripherals.GPIO1, Level::High, OutputConfig::default());
+    let delay = esp_hal::delay::Delay::new();
+
+    // Connect the LED to pin 7 with a 220ohm resistor
+    let led = peripherals.GPIO7;
+    let mut ledc = esp_hal::ledc::Ledc::new(peripherals.LEDC);
+    ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
+
+    let mut timer = ledc.timer::<esp_hal::ledc::LowSpeed>(esp_hal::ledc::timer::Number::Timer0);
+
+    timer
+        .configure(Config {
+            duty: Duty::Duty14Bit,
+            clock_source: LSClockSource::APBClk,
+            frequency: Rate::from_khz(1u32),
+        })
+        .unwrap();
+    let mut channel = ledc.channel(esp_hal::ledc::channel::Number::Channel0, led);
+    channel
+        .configure(esp_hal::ledc::channel::config::Config {
+            timer: &timer,
+            duty_pct: 0,
+            drive_mode: DriveMode::PushPull,
+        })
+        .unwrap();
     // TODO: Spawn some tasks
     let _ = spawner;
 
+    let max_duty = 100u8;
+    let min_duty = 0u8;
+
     loop {
-        // Turn on LED
-        led.set_high();
-        // Wait for 1 second
-        println!("hello blinky");
-        Timer::after(Duration::from_millis(1_000)).await;
-        // Turn off LED
-        led.set_low();
-        // Wait for a second
-        Timer::after(Duration::from_secs(1)).await;
+        for duty in min_duty..max_duty {
+            channel.set_duty(duty).unwrap();
+            delay.delay_millis(10);
+        }
+
+        for duty in (min_duty..max_duty).rev() {
+            channel.set_duty(duty).unwrap();
+            delay.delay_millis(10);
+        }
     }
 }
